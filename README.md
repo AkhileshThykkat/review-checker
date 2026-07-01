@@ -59,7 +59,13 @@ No checkout step is needed — the diff comes from the GitHub API, not the local
 3. Builds one prompt from two rule tiers: **generic backend rules** baked into the binary (versioned with releases, improve on upgrade) and your repo's **`custom_rules`**.
 4. Large diffs are truncated to a per-file token budget, with the truncation flagged in the prompt so the model doesn't guess about hidden context.
 5. The model returns findings as JSON (`file`, `line`, `severity`, `comment`). Each line number is translated to a GitHub diff position by parsing the patch hunks; findings pointing outside the diff are dropped.
-6. Comments from previous runs are superseded: on a new push the old comments are deleted and fresh ones posted.
+6. Comments from previous runs are superseded: on a new push the old line comments and the old summary comment are deleted and fresh ones posted. (The summary is an issue comment, not a review body, precisely so it can be cleaned up — submitted reviews can never be deleted.)
+
+## Limitations
+
+- **PRs from forks are not supported.** On `pull_request` events from a fork, GitHub gives the workflow a read-only `GITHUB_TOKEN` and no secrets — the action can neither call your LLM nor post comments. Works for branches within the same repo (the normal setup for private/team repos).
+- Findings the model reports on lines outside the diff are dropped (GitHub can't anchor them); the run log lists every dropped finding.
+- GitHub Enterprise Server is supported automatically: the action honors the `GITHUB_API_URL` env var that Actions sets on GHES runners.
 
 ## Configuration reference
 
@@ -68,10 +74,14 @@ No checkout step is needed — the diff comes from the GitHub API, not the local
 | `llm.base_url` | yes | — | OpenAI-compatible endpoint, including version prefix (e.g. `https://api.deepseek.com/v1`) |
 | `llm.api_key_env` | yes | — | Name of the env var holding the API key |
 | `llm.model` | yes | — | Model name passed to the endpoint |
+| `llm.temperature` | no | omitted | Sampling temperature; when unset the parameter is not sent (needed for models that reject it, e.g. OpenAI o-series) |
 | `mode` | no | `comment_only` | Only `comment_only` in v1 |
 | `ignore` | no | `[]` | Glob patterns (doublestar `**` supported) added to built-in defaults |
 | `custom_rules` | no | `[]` | Repo-specific rules appended to the generic rules |
-| `max_file_tokens` | no | `8000` | Approximate per-file token budget before truncation |
+| `max_file_tokens` | no | `8000` | Approximate per-file token budget before a file's diff is truncated |
+| `max_total_tokens` | no | `60000` | Approximate budget for the whole diff section; files past it are omitted from the review (listed as omitted in the prompt and logs) |
+
+Unknown keys in the config are rejected — a typo like `custom_rule:` fails the run instead of silently dropping your rules.
 
 ### Action inputs
 

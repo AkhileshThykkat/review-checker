@@ -22,20 +22,24 @@ type Client interface {
 
 // OpenAICompat implements Client against POST {baseURL}/chat/completions.
 type OpenAICompat struct {
-	baseURL string
-	apiKey  string
-	model   string
-	http    *http.Client
+	baseURL     string
+	apiKey      string
+	model       string
+	temperature *float32
+	http        *http.Client
 }
 
 // NewOpenAICompat builds a client. baseURL should include the version prefix
-// if the provider uses one (e.g. https://api.deepseek.com/v1).
-func NewOpenAICompat(baseURL, apiKey, model string) *OpenAICompat {
+// if the provider uses one (e.g. https://api.deepseek.com/v1). A nil
+// temperature is omitted from requests — required for models that reject
+// the parameter (e.g. OpenAI o-series).
+func NewOpenAICompat(baseURL, apiKey, model string, temperature *float32) *OpenAICompat {
 	return &OpenAICompat{
-		baseURL: strings.TrimRight(baseURL, "/"),
-		apiKey:  apiKey,
-		model:   model,
-		http:    &http.Client{Timeout: 5 * time.Minute},
+		baseURL:     strings.TrimRight(baseURL, "/"),
+		apiKey:      apiKey,
+		model:       model,
+		temperature: temperature,
+		http:        &http.Client{Timeout: 5 * time.Minute},
 	}
 }
 
@@ -47,7 +51,7 @@ type chatMessage struct {
 type chatRequest struct {
 	Model       string        `json:"model"`
 	Messages    []chatMessage `json:"messages"`
-	Temperature float32       `json:"temperature"`
+	Temperature *float32      `json:"temperature,omitempty"`
 }
 
 type chatResponse struct {
@@ -68,7 +72,7 @@ func (c *OpenAICompat) Complete(ctx context.Context, system, user string) (strin
 			{Role: "system", Content: system},
 			{Role: "user", Content: user},
 		},
-		Temperature: 0,
+		Temperature: c.temperature,
 	})
 	if err != nil {
 		return "", err

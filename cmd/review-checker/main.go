@@ -43,7 +43,10 @@ func run(ctx context.Context, configPath string) error {
 	if err != nil {
 		return err
 	}
-	client := gh.NewClient(token, pr.owner, pr.repo, pr.number)
+	client, err := gh.NewClient(token, pr.owner, pr.repo, pr.number)
+	if err != nil {
+		return err
+	}
 
 	cfg, err := loadConfig(ctx, client, configPath, pr.headSHA)
 	if err != nil {
@@ -67,22 +70,37 @@ func run(ctx context.Context, configPath string) error {
 	}
 	log.Printf("%d file(s) to review", len(files))
 
-	// Build prompt with per-file token budget.
+	// Build prompt under per-file and total token budgets. Once the total
+	// budget can't fit a useful slice of the next file, the rest are
+	// omitted and disclosed to the model.
+	const minUsefulTokens = 256
 	diffs := make([]rules.FileDiff, 0, len(files))
 	positions := make(map[string]map[int]int, len(files))
+	var omitted []string
+	remaining := cfg.MaxTotalTokens
 	for _, f := range files {
-		patch, truncated := rules.TruncatePatch(f.Patch, cfg.MaxFileTokens)
-		if truncated {
-			log.Printf("truncated %s to ~%d tokens", f.Path, cfg.MaxFileTokens)
+		if remaining < minUsefulTokens {
+			omitted = append(omitted, f.Path)
+			continue
 		}
+		budget := min(cfg.MaxFileTokens, remaining)
+		patch, truncated := rules.TruncatePatch(f.Patch, budget)
+		if truncated {
+			log.Printf("truncated %s to ~%d tokens", f.Path, budget)
+		}
+		remaining -= len(patch) / 4
 		diffs = append(diffs, rules.FileDiff{Path: f.Path, Patch: patch, Truncated: truncated})
 		// Positions are mapped from the truncated patch: the model only saw
 		// that much, and a position past the cut would be invalid anyway.
 		positions[f.Path] = gh.BuildPositionMap(patch)
 	}
+	if len(omitted) > 0 {
+		log.Printf("omitted %d file(s) over the ~%d total token budget: %s",
+			len(omitted), cfg.MaxTotalTokens, strings.Join(omitted, ", "))
+	}
 
-	llmClient := llm.NewOpenAICompat(cfg.LLM.BaseURL, apiKey, cfg.LLM.Model)
-	response, err := llmClient.Complete(ctx, rules.SystemPrompt, rules.BuildUserPrompt(cfg.CustomRules, diffs))
+	llmClient := llm.NewOpenAICompat(cfg.LLM.BaseURL, apiKey, cfg.LLM.Model, cfg.LLM.Temperature)
+	response, err := llmClient.Complete(ctx, rules.SystemPrompt, rules.BuildUserPrompt(cfg.CustomRules, diffs, omitted))
 	if err != nil {
 		return err
 	}
@@ -107,8 +125,11 @@ func run(ctx context.Context, configPath string) error {
 		return nil
 	}
 
+	if err := client.PostReview(ctx, comments); err != nil {
+		return err
+	}
 	summary := fmt.Sprintf("%s\n**review-checker** found %d issue(s). Severity is informational in v1 — this check never blocks CI.", gh.Marker, len(comments))
-	if err := client.PostReview(ctx, summary, comments); err != nil {
+	if err := client.PostSummary(ctx, summary); err != nil {
 		return err
 	}
 	log.Printf("posted review with %d comment(s)", len(comments))
@@ -198,7 +219,8 @@ func matchesAny(path string, globs []string) bool {
 }
 
 // resolveComments translates model findings (file + new-file line) into
-// GitHub diff positions, dropping any finding the diff cannot anchor.
+// GitHub diff positions, dropping any finding the diff cannot anchor and
+// deduplicating repeats the model may emit.
 func resolveComments(findings []llm.Finding, positions map[string]map[int]int) []gh.Comment {
 	badge := map[string]string{
 		llm.SeverityBlock: "🔴 **block**",
@@ -206,20 +228,31 @@ func resolveComments(findings []llm.Finding, positions map[string]map[int]int) [
 		llm.SeverityNit:   "🔵 **nit**",
 	}
 
+	seen := make(map[string]bool, len(findings))
 	var comments []gh.Comment
 	for _, f := range findings {
-		fileMap, ok := positions[f.File]
+		// Models sometimes prefix paths with ./ or / — positions are keyed
+		// by the exact path GitHub reported.
+		path := strings.TrimPrefix(strings.TrimPrefix(f.File, "./"), "/")
+
+		fileMap, ok := positions[path]
 		if !ok {
 			log.Printf("dropping finding for unknown file %s", f.File)
 			continue
 		}
 		pos, ok := fileMap[f.Line]
 		if !ok {
-			log.Printf("dropping finding at %s:%d (line not in diff)", f.File, f.Line)
+			log.Printf("dropping finding at %s:%d (line not in diff)", path, f.Line)
 			continue
 		}
+		key := fmt.Sprintf("%s:%d:%s", path, f.Line, f.Comment)
+		if seen[key] {
+			log.Printf("dropping duplicate finding at %s:%d", path, f.Line)
+			continue
+		}
+		seen[key] = true
 		comments = append(comments, gh.Comment{
-			Path:     f.File,
+			Path:     path,
 			Position: pos,
 			Body:     fmt.Sprintf("%s\n%s: %s", gh.Marker, badge[f.Severity], f.Comment),
 		})

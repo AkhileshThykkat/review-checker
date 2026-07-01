@@ -40,8 +40,9 @@ type FileDiff struct {
 
 // BuildUserPrompt assembles the generic rules, repo-specific rules, and the
 // diff into clearly labeled sections so the model treats the generic set as
-// baseline and the repo set as addition.
-func BuildUserPrompt(customRules []string, files []FileDiff) string {
+// baseline and the repo set as addition. Files dropped for the total token
+// budget are listed so the model doesn't assume it saw the whole PR.
+func BuildUserPrompt(customRules []string, files []FileDiff, omitted []string) string {
 	var b strings.Builder
 
 	b.WriteString("# Generic backend rules\n\n")
@@ -65,6 +66,13 @@ func BuildUserPrompt(customRules []string, files []FileDiff) string {
 		b.WriteString("```diff\n")
 		b.WriteString(f.Patch)
 		b.WriteString("\n```\n")
+	}
+
+	if len(omitted) > 0 {
+		b.WriteString("\n# Files changed in this PR but omitted for token budget (do not assume anything about them)\n")
+		for _, path := range omitted {
+			fmt.Fprintf(&b, "- %s\n", path)
+		}
 	}
 
 	return b.String()

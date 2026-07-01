@@ -2,7 +2,10 @@
 package config
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 
 	"gopkg.in/yaml.v3"
@@ -13,6 +16,10 @@ type LLM struct {
 	BaseURL   string `yaml:"base_url"`
 	APIKeyEnv string `yaml:"api_key_env"`
 	Model     string `yaml:"model"`
+
+	// Temperature is omitted from the request when unset, so models that
+	// reject the parameter (e.g. OpenAI o-series) use their default.
+	Temperature *float32 `yaml:"temperature"`
 }
 
 // Config is the parsed .review-checker.yaml.
@@ -30,6 +37,10 @@ type Config struct {
 	// MaxFileTokens is the approximate per-file token budget before a
 	// file's patch is truncated in the prompt.
 	MaxFileTokens int `yaml:"max_file_tokens"`
+
+	// MaxTotalTokens caps the whole diff section of the prompt; files past
+	// the budget are omitted (and listed as omitted in the prompt).
+	MaxTotalTokens int `yaml:"max_total_tokens"`
 }
 
 // DefaultIgnore is always applied; repo config extends it.
@@ -55,7 +66,8 @@ var DefaultIgnore = []string{
 const (
 	ModeCommentOnly = "comment_only"
 
-	defaultMaxFileTokens = 8000
+	defaultMaxFileTokens  = 8000
+	defaultMaxTotalTokens = 60000
 )
 
 // Load reads, parses, and validates the config file at path.
@@ -68,9 +80,16 @@ func Load(path string) (*Config, error) {
 }
 
 // Parse validates raw YAML config bytes; path is used in error messages only.
+// Unknown fields are rejected so a typo (custom_rule: for custom_rules:)
+// fails loudly instead of silently dropping the setting.
 func Parse(raw []byte, path string) (*Config, error) {
 	cfg := &Config{}
-	if err := yaml.Unmarshal(raw, cfg); err != nil {
+	dec := yaml.NewDecoder(bytes.NewReader(raw))
+	dec.KnownFields(true)
+	if err := dec.Decode(cfg); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil, fmt.Errorf("%s is empty", path)
+		}
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 
@@ -92,6 +111,9 @@ func Parse(raw []byte, path string) (*Config, error) {
 	}
 	if cfg.MaxFileTokens <= 0 {
 		cfg.MaxFileTokens = defaultMaxFileTokens
+	}
+	if cfg.MaxTotalTokens <= 0 {
+		cfg.MaxTotalTokens = defaultMaxTotalTokens
 	}
 
 	return cfg, nil

@@ -13,16 +13,18 @@ inputs:
   version:
     description: 'review-checker release version to download (e.g. v0.1.0). Defaults to the version this action tag ships with.'
     required: false
-    default: 'v0.1.1'
+    default: 'v0.1.2'
 
 runs:
   using: 'composite'
   steps:
     - name: Download review-checker binary
       shell: bash
+      env:
+        RC_VERSION: ${{ inputs.version }}
       run: |
         set -euo pipefail
-        VERSION="${{ inputs.version }}"
+        VERSION="${RC_VERSION}"
         case "$(uname -s)" in
           Linux)  OS=linux ;;
           Darwin) OS=darwin ;;
@@ -44,4 +46,6 @@ runs:
 
     - name: Run review-checker
       shell: bash
-      run: review-checker -config "${{ inputs.config }}"
+      env:
+        RC_CONFIG: ${{ inputs.config }}
+      run: review-checker -config "${RC_CONFIG}"

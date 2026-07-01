@@ -28,3 +28,12 @@ custom_rules:
 # Approximate per-file token budget before a file's diff is truncated
 # in the prompt. Default: 8000.
 # max_file_tokens: 8000
+
+# Approximate budget for the whole diff section of the prompt; files past
+# it are omitted from the review (and disclosed as omitted). Default: 60000.
+# max_total_tokens: 60000
+
+# Sampling temperature. Leave unset to omit the parameter entirely —
+# required for models that reject it (e.g. OpenAI o-series).
+# Set under llm:, e.g.
+#   temperature: 0
