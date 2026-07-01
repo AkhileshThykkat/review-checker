@@ -35,7 +35,7 @@ func TestCompleteRetriesOn429ThenSucceeds(t *testing.T) {
 		fmt.Fprint(w, okResponse("hello"))
 	})
 
-	got, err := c.Complete(context.Background(), "sys", "user")
+	got, _, err := c.Complete(context.Background(), "sys", "user")
 	if err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
@@ -44,6 +44,21 @@ func TestCompleteRetriesOn429ThenSucceeds(t *testing.T) {
 	}
 	if calls != 3 {
 		t.Errorf("calls = %d, want 3", calls)
+	}
+}
+
+func TestCompleteReturnsUsage(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"choices":[{"message":{"content":"[]"}}],"usage":{"prompt_tokens":120,"completion_tokens":30,"total_tokens":150}}`)
+	})
+
+	_, usage, err := c.Complete(context.Background(), "sys", "user")
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	want := Usage{PromptTokens: 120, CompletionTokens: 30, TotalTokens: 150}
+	if usage != want {
+		t.Errorf("usage = %+v, want %+v", usage, want)
 	}
 }
 
@@ -58,7 +73,7 @@ func TestCompleteRetriesOn5xx(t *testing.T) {
 		fmt.Fprint(w, okResponse("ok"))
 	})
 
-	if _, err := c.Complete(context.Background(), "sys", "user"); err != nil {
+	if _, _, err := c.Complete(context.Background(), "sys", "user"); err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
 	if calls != 2 {
@@ -73,7 +88,7 @@ func TestCompleteGivesUpAfterMaxRetries(t *testing.T) {
 		w.WriteHeader(http.StatusInternalServerError)
 	})
 
-	_, err := c.Complete(context.Background(), "sys", "user")
+	_, _, err := c.Complete(context.Background(), "sys", "user")
 	if err == nil {
 		t.Fatal("Complete succeeded, want error")
 	}
@@ -92,7 +107,7 @@ func TestCompleteDoesNotRetryAuthErrors(t *testing.T) {
 		w.WriteHeader(http.StatusUnauthorized)
 	})
 
-	if _, err := c.Complete(context.Background(), "sys", "user"); err == nil {
+	if _, _, err := c.Complete(context.Background(), "sys", "user"); err == nil {
 		t.Fatal("Complete succeeded, want error")
 	}
 	if calls != 1 {
@@ -109,7 +124,7 @@ func TestCompleteRespectsContextDuringBackoff(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		_, err := c.Complete(ctx, "sys", "user")
+		_, _, err := c.Complete(ctx, "sys", "user")
 		done <- err
 	}()
 	cancel()

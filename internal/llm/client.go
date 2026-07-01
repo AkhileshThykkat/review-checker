@@ -18,7 +18,15 @@ import (
 // Client is the provider seam: a future non-OpenAI-shaped provider is a new
 // implementation, not a rewrite.
 type Client interface {
-	Complete(ctx context.Context, system, user string) (string, error)
+	Complete(ctx context.Context, system, user string) (string, Usage, error)
+}
+
+// Usage is the provider-reported token consumption for one completion.
+// Zero-valued when the provider omits the usage block.
+type Usage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
 }
 
 // OpenAICompat implements Client against POST {baseURL}/chat/completions.
@@ -70,9 +78,10 @@ type chatResponse struct {
 	Error *struct {
 		Message string `json:"message"`
 	} `json:"error"`
+	Usage Usage `json:"usage"`
 }
 
-func (c *OpenAICompat) Complete(ctx context.Context, system, user string) (string, error) {
+func (c *OpenAICompat) Complete(ctx context.Context, system, user string) (string, Usage, error) {
 	payload, err := json.Marshal(chatRequest{
 		Model: c.model,
 		Messages: []chatMessage{
@@ -82,23 +91,23 @@ func (c *OpenAICompat) Complete(ctx context.Context, system, user string) (strin
 		Temperature: c.temperature,
 	})
 	if err != nil {
-		return "", err
+		return "", Usage{}, err
 	}
 
 	for attempt := 0; ; attempt++ {
-		content, retryable, err := c.complete(ctx, payload)
+		content, usage, retryable, err := c.complete(ctx, payload)
 		if err == nil {
-			return content, nil
+			return content, usage, nil
 		}
 		if !retryable || attempt == maxRetries {
-			return "", err
+			return "", Usage{}, err
 		}
 		delay := c.backoff << attempt
 		log.Printf("llm request failed (attempt %d/%d), retrying in %s: %v",
 			attempt+1, maxRetries+1, delay, err)
 		select {
 		case <-ctx.Done():
-			return "", ctx.Err()
+			return "", Usage{}, ctx.Err()
 		case <-time.After(delay):
 		}
 	}
@@ -107,41 +116,41 @@ func (c *OpenAICompat) Complete(ctx context.Context, system, user string) (strin
 // complete runs one request. retryable reports whether the failure is worth
 // re-attempting: transport errors, 429, and 5xx. Other non-200s (401, 400)
 // won't improve on retry.
-func (c *OpenAICompat) complete(ctx context.Context, payload []byte) (content string, retryable bool, err error) {
+func (c *OpenAICompat) complete(ctx context.Context, payload []byte) (content string, usage Usage, retryable bool, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		c.baseURL+"/chat/completions", bytes.NewReader(payload))
 	if err != nil {
-		return "", false, err
+		return "", Usage{}, false, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return "", ctx.Err() == nil, fmt.Errorf("llm request: %w", err)
+		return "", Usage{}, ctx.Err() == nil, fmt.Errorf("llm request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
 	if err != nil {
-		return "", true, fmt.Errorf("read llm response: %w", err)
+		return "", Usage{}, true, fmt.Errorf("read llm response: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		retryable := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500
-		return "", retryable, fmt.Errorf("llm returned %d: %s", resp.StatusCode, truncate(string(body), 500))
+		return "", Usage{}, retryable, fmt.Errorf("llm returned %d: %s", resp.StatusCode, truncate(string(body), 500))
 	}
 
 	var parsed chatResponse
 	if err := json.Unmarshal(body, &parsed); err != nil {
-		return "", false, fmt.Errorf("decode llm response: %w", err)
+		return "", Usage{}, false, fmt.Errorf("decode llm response: %w", err)
 	}
 	if parsed.Error != nil {
-		return "", false, fmt.Errorf("llm error: %s", parsed.Error.Message)
+		return "", Usage{}, false, fmt.Errorf("llm error: %s", parsed.Error.Message)
 	}
 	if len(parsed.Choices) == 0 {
-		return "", false, fmt.Errorf("llm returned no choices")
+		return "", Usage{}, false, fmt.Errorf("llm returned no choices")
 	}
-	return parsed.Choices[0].Message.Content, false, nil
+	return parsed.Choices[0].Message.Content, parsed.Usage, false, nil
 }
 
 func truncate(s string, n int) string {

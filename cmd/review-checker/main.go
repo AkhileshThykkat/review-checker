@@ -100,9 +100,13 @@ func run(ctx context.Context, configPath string) error {
 	}
 
 	llmClient := llm.NewOpenAICompat(cfg.LLM.BaseURL, apiKey, cfg.LLM.Model, cfg.LLM.Temperature)
-	response, err := llmClient.Complete(ctx, rules.SystemPrompt, rules.BuildUserPrompt(cfg.CustomRules, diffs, omitted))
+	response, usage, err := llmClient.Complete(ctx, rules.SystemPrompt, rules.BuildUserPrompt(cfg.CustomRules, diffs, omitted))
 	if err != nil {
 		return err
+	}
+	if usage.TotalTokens > 0 {
+		log.Printf("token usage: %d prompt + %d completion = %d total",
+			usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens)
 	}
 
 	findings, err := llm.ParseFindings(response)
@@ -111,7 +115,7 @@ func run(ctx context.Context, configPath string) error {
 	}
 	log.Printf("model reported %d finding(s)", len(findings))
 
-	comments := resolveComments(findings, positions)
+	comments, counts := resolveComments(findings, positions)
 	if dropped := len(findings) - len(comments); dropped > 0 {
 		log.Printf("dropped %d finding(s) pointing outside the diff", dropped)
 	}
@@ -128,8 +132,7 @@ func run(ctx context.Context, configPath string) error {
 	if err := client.PostReview(ctx, comments); err != nil {
 		return err
 	}
-	summary := fmt.Sprintf("%s\n**review-checker** found %d issue(s). Severity is informational in v1 — this check never blocks CI.", gh.Marker, len(comments))
-	if err := client.PostSummary(ctx, summary); err != nil {
+	if err := client.PostSummary(ctx, buildSummary(cfg.LLM.Model, counts, usage)); err != nil {
 		return err
 	}
 	log.Printf("posted review with %d comment(s)", len(comments))
@@ -220,8 +223,9 @@ func matchesAny(path string, globs []string) bool {
 
 // resolveComments translates model findings (file + new-file line) into
 // GitHub diff positions, dropping any finding the diff cannot anchor and
-// deduplicating repeats the model may emit.
-func resolveComments(findings []llm.Finding, positions map[string]map[int]int) []gh.Comment {
+// deduplicating repeats the model may emit. counts tallies the kept
+// findings per severity for the summary comment.
+func resolveComments(findings []llm.Finding, positions map[string]map[int]int) (comments []gh.Comment, counts map[string]int) {
 	badge := map[string]string{
 		llm.SeverityBlock: "🔴 **block**",
 		llm.SeverityWarn:  "🟡 **warn**",
@@ -229,7 +233,7 @@ func resolveComments(findings []llm.Finding, positions map[string]map[int]int) [
 	}
 
 	seen := make(map[string]bool, len(findings))
-	var comments []gh.Comment
+	counts = make(map[string]int)
 	for _, f := range findings {
 		// Paths are already normalized by ParseFindings, so they match the
 		// exact paths GitHub reported.
@@ -249,11 +253,43 @@ func resolveComments(findings []llm.Finding, positions map[string]map[int]int) [
 			continue
 		}
 		seen[key] = true
+		counts[f.Severity]++
 		comments = append(comments, gh.Comment{
 			Path:     f.File,
 			Position: pos,
 			Body:     fmt.Sprintf("%s\n%s: %s", gh.Marker, badge[f.Severity], f.Comment),
 		})
 	}
-	return comments
+	return comments, counts
+}
+
+// buildSummary renders the PR conversation comment: severity breakdown,
+// model, and provider-reported token usage (omitted when the provider
+// doesn't return a usage block).
+func buildSummary(model string, counts map[string]int, usage llm.Usage) string {
+	total := counts[llm.SeverityBlock] + counts[llm.SeverityWarn] + counts[llm.SeverityNit]
+
+	var parts []string
+	for _, s := range []struct{ severity, emoji string }{
+		{llm.SeverityBlock, "🔴"},
+		{llm.SeverityWarn, "🟡"},
+		{llm.SeverityNit, "🔵"},
+	} {
+		if n := counts[s.severity]; n > 0 {
+			parts = append(parts, fmt.Sprintf("%s %d %s", s.emoji, n, s.severity))
+		}
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s\n**review-checker** found %d issue(s)", gh.Marker, total)
+	if len(parts) > 0 {
+		fmt.Fprintf(&b, ": %s", strings.Join(parts, " · "))
+	}
+	fmt.Fprintf(&b, "\n\nModel: `%s`", model)
+	if usage.TotalTokens > 0 {
+		fmt.Fprintf(&b, " · Tokens: %d (%d prompt + %d completion)",
+			usage.TotalTokens, usage.PromptTokens, usage.CompletionTokens)
+	}
+	b.WriteString("\n\nSeverity is informational in v1 — this check never blocks CI.")
+	return b.String()
 }
