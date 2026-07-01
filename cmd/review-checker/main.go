@@ -34,7 +34,18 @@ func main() {
 }
 
 func run(ctx context.Context, configPath string) error {
-	cfg, err := config.Load(configPath)
+	token := os.Getenv("GITHUB_TOKEN")
+	if token == "" {
+		return fmt.Errorf("GITHUB_TOKEN is empty — pass it through the workflow env")
+	}
+
+	pr, err := githubContext()
+	if err != nil {
+		return err
+	}
+	client := gh.NewClient(token, pr.owner, pr.repo, pr.number)
+
+	cfg, err := loadConfig(ctx, client, configPath, pr.headSHA)
 	if err != nil {
 		return err
 	}
@@ -43,18 +54,7 @@ func run(ctx context.Context, configPath string) error {
 	if apiKey == "" {
 		return fmt.Errorf("env var %s (llm.api_key_env) is empty — pass the secret through the workflow env", cfg.LLM.APIKeyEnv)
 	}
-	token := os.Getenv("GITHUB_TOKEN")
-	if token == "" {
-		return fmt.Errorf("GITHUB_TOKEN is empty — pass it through the workflow env")
-	}
-
-	owner, repo, prNumber, err := githubContext()
-	if err != nil {
-		return err
-	}
-	log.Printf("reviewing %s/%s#%d with %s", owner, repo, prNumber, cfg.LLM.Model)
-
-	client := gh.NewClient(token, owner, repo, prNumber)
+	log.Printf("reviewing %s/%s#%d with %s", pr.owner, pr.repo, pr.number, cfg.LLM.Model)
 
 	files, err := client.ChangedFiles(ctx)
 	if err != nil {
@@ -115,35 +115,65 @@ func run(ctx context.Context, configPath string) error {
 	return nil
 }
 
-// githubContext resolves owner, repo, and PR number from Actions env:
+type prContext struct {
+	owner   string
+	repo    string
+	number  int
+	headSHA string
+}
+
+// githubContext resolves the PR coordinates from Actions env:
 // GITHUB_REPOSITORY ("owner/repo") and the pull_request event payload.
-func githubContext() (owner, repo string, prNumber int, err error) {
+func githubContext() (*prContext, error) {
 	full := os.Getenv("GITHUB_REPOSITORY")
 	owner, repo, ok := strings.Cut(full, "/")
 	if !ok {
-		return "", "", 0, fmt.Errorf("GITHUB_REPOSITORY malformed or unset: %q", full)
+		return nil, fmt.Errorf("GITHUB_REPOSITORY malformed or unset: %q", full)
 	}
 
 	eventPath := os.Getenv("GITHUB_EVENT_PATH")
 	if eventPath == "" {
-		return "", "", 0, fmt.Errorf("GITHUB_EVENT_PATH unset — must run inside GitHub Actions on a pull_request event")
+		return nil, fmt.Errorf("GITHUB_EVENT_PATH unset — must run inside GitHub Actions on a pull_request event")
 	}
 	raw, err := os.ReadFile(eventPath)
 	if err != nil {
-		return "", "", 0, fmt.Errorf("read event payload: %w", err)
+		return nil, fmt.Errorf("read event payload: %w", err)
 	}
 	var event struct {
 		PullRequest struct {
 			Number int `json:"number"`
+			Head   struct {
+				SHA string `json:"sha"`
+			} `json:"head"`
 		} `json:"pull_request"`
 	}
 	if err := json.Unmarshal(raw, &event); err != nil {
-		return "", "", 0, fmt.Errorf("parse event payload: %w", err)
+		return nil, fmt.Errorf("parse event payload: %w", err)
 	}
 	if event.PullRequest.Number == 0 {
-		return "", "", 0, fmt.Errorf("no pull_request in event payload — trigger the workflow on pull_request events")
+		return nil, fmt.Errorf("no pull_request in event payload — trigger the workflow on pull_request events")
 	}
-	return owner, repo, event.PullRequest.Number, nil
+	return &prContext{
+		owner:   owner,
+		repo:    repo,
+		number:  event.PullRequest.Number,
+		headSHA: event.PullRequest.Head.SHA,
+	}, nil
+}
+
+// loadConfig reads the config from the local checkout when present, else
+// fetches it from the repo at the PR head via the GitHub API — so consumer
+// workflows don't need a checkout step.
+func loadConfig(ctx context.Context, client *gh.Client, path, ref string) (*config.Config, error) {
+	if _, statErr := os.Stat(path); statErr == nil {
+		return config.Load(path)
+	}
+	log.Printf("%s not in workspace, fetching from repo via API", path)
+	raw, err := client.FetchFile(ctx, path, ref)
+	if err != nil {
+		return nil, fmt.Errorf("config %s not found locally and not fetchable from repo: %w", path, err)
+	}
+	return config.Parse(raw, path)
 }
 
 func filterIgnored(files []gh.PRFile, globs []string) []gh.PRFile {

@@ -46,6 +46,21 @@ func NewClient(token, owner, repo string, number int) *Client {
 	}
 }
 
+// FetchFile returns a file's content from the repo at ref via the contents
+// API — lets the action run without a checkout step.
+func (c *Client) FetchFile(ctx context.Context, path, ref string) ([]byte, error) {
+	content, _, _, err := c.api.Repositories.GetContents(ctx, c.owner, c.repo, path,
+		&github.RepositoryContentGetOptions{Ref: ref})
+	if err != nil {
+		return nil, fmt.Errorf("fetch %s@%s from GitHub: %w", path, ref, err)
+	}
+	text, err := content.GetContent()
+	if err != nil {
+		return nil, fmt.Errorf("decode %s: %w", path, err)
+	}
+	return []byte(text), nil
+}
+
 // ChangedFiles returns every file in the PR diff that has patch text.
 // Binary files and huge files GitHub omits patches for are skipped.
 func (c *Client) ChangedFiles(ctx context.Context) ([]PRFile, error) {

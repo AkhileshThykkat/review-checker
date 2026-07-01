@@ -64,7 +64,11 @@ func Load(path string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
+	return Parse(raw, path)
+}
 
+// Parse validates raw YAML config bytes; path is used in error messages only.
+func Parse(raw []byte, path string) (*Config, error) {
 	cfg := &Config{}
 	if err := yaml.Unmarshal(raw, cfg); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
