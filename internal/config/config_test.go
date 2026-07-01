@@ -85,6 +85,20 @@ func TestParseReviewMode(t *testing.T) {
 	}
 }
 
+func TestParseRulePacks(t *testing.T) {
+	cfg, err := Parse([]byte(validYAML+"rule_packs:\n  - react\n  - typescript\n"), "test.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.RulePacks) != 2 {
+		t.Errorf("rule_packs = %v, want 2 entries", cfg.RulePacks)
+	}
+
+	if _, err := Parse([]byte(validYAML+"rule_packs:\n  - cobol\n"), "test.yaml"); err == nil {
+		t.Error("want error for unknown rule pack")
+	}
+}
+
 func TestParseSuppress(t *testing.T) {
 	yaml := validYAML + `
 suppress:

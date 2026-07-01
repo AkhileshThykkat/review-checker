@@ -1,20 +1,13 @@
-# Generic backend review rules
+# Python backend rules
 
-## Correctness
-- Flag logic that can raise unhandled exceptions on realistic inputs (None/empty/missing keys, type mismatches, off-by-one).
-- Flag error handling that swallows exceptions silently (`except: pass`, broad `except Exception` without logging or re-raising).
-- Flag mutable default arguments in Python function signatures.
-- Flag race conditions: check-then-act on shared state, non-atomic read-modify-write on rows or counters without `select_for_update`/`F()` expressions.
-
-## Security
-- Flag any raw SQL built with string formatting or f-strings — parameterize instead (SQL injection).
-- Flag user input rendered without escaping, `mark_safe`/`|safe` on user-controlled data (XSS).
-- Flag secrets, API keys, tokens, or passwords hardcoded in source or logged.
-- Flag missing authentication/permission checks on views and API endpoints that mutate data.
-- Flag `pickle`, `eval`, `exec`, or `yaml.load` (without SafeLoader) on external input.
-- Flag disabled CSRF protection without justification.
+## Language
+- Flag mutable default arguments in function signatures.
+- Flag `pickle` or `yaml.load` (without SafeLoader) on external input.
+- Flag non-atomic ORM counter updates — use `select_for_update`/`F()` expressions.
 
 ## Django / ORM
+- Flag `mark_safe`/`|safe` on user-controlled data (XSS).
+- Flag disabled CSRF protection without justification.
 - Flag N+1 query patterns: iterating a queryset and touching FK/M2M attributes without `select_related`/`prefetch_related`.
 - Flag unbounded querysets returned to serializers or templates — require pagination or explicit limits on list endpoints.
 - Flag queries inside loops that could be a single `filter(...in=...)`, `bulk_create`, or `bulk_update`.
@@ -43,19 +36,6 @@
 - Flag mutable global variables used for per-request or cross-request state — breaks under multiple workers; use `g` for request scope, a store for shared state.
 - Flag error handlers (or their absence) that return HTML/inconsistent shapes on JSON APIs — register handlers returning the API's error schema.
 
-## API design
-- Flag endpoints returning inconsistent shapes between success and error paths.
-- Flag missing input validation on request bodies and query params (trust boundary).
-- Flag breaking changes to existing public API response fields without versioning.
-
-## Reliability & performance
-- Flag blocking calls (HTTP requests, heavy queries) inside request handlers that should be async/queued (Celery or equivalent).
-- Flag missing timeouts on outbound HTTP calls.
-- Flag caching of user-specific data under a shared cache key.
-- Flag unbounded memory patterns: reading whole files/querysets into memory when streaming/iterating is available.
-
-## Maintainability
-- Flag dead code, commented-out blocks, and debug leftovers (`print`, `pdb`, `console.log`).
-- Flag duplicated non-trivial logic that should reuse an existing helper visible in the diff.
-- Flag misleading names: functions whose name contradicts what the body does.
-- Only comment on style when it changes meaning or hides a bug — formatters own style.
+## Celery / background work
+- Flag blocking work in request handlers that belongs in a task queue.
+- Flag new tasks without an explicit retry policy where the work can fail transiently.

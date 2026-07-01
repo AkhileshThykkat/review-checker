@@ -17,6 +17,14 @@ mode: comment_only
 # whole diff and supersede all previous comments on every push.
 # review_mode: incremental
 
+# Built-in rule packs are auto-selected from the diff's file types:
+# core (always), python-backend (.py), typescript (.js/.ts),
+# react (.jsx/.tsx — includes design-system consistency rules).
+# Pin explicitly only when auto-detection doesn't fit:
+# rule_packs:
+#   - typescript
+#   - react
+
 # Extends the built-in ignore list (migrations, lockfiles, vendor/,
 # node_modules/, minified and generated files are always skipped).
 ignore:

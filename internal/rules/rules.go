@@ -1,21 +1,98 @@
-// Package rules bakes the generic review rules into the binary and merges
-// them with a consumer repo's custom rules into the review prompt.
+// Package rules bakes the built-in review rule packs into the binary,
+// selects the packs relevant to a diff, and merges them with a consumer
+// repo's custom rules into the review prompt.
 package rules
 
 import (
-	_ "embed"
+	"embed"
 	"fmt"
+	"path"
 	"strings"
 )
 
-// DefaultRules is versioned with Action releases: every consumer repo gets
+// Rule packs are versioned with Action releases: every consumer repo gets
 // rule improvements on upgrade, no per-repo copying.
 //
-//go:embed default_rules.md
-var DefaultRules string
+//go:embed packs/*.md
+var packsFS embed.FS
+
+// Pack names. Core is always active; the rest are selected per diff.
+const (
+	PackCore          = "core"
+	PackPythonBackend = "python-backend"
+	PackTypeScript    = "typescript"
+	PackReact         = "react"
+)
+
+// packOrder fixes prompt ordering: generic rules first, then language,
+// then framework.
+var packOrder = []string{PackCore, PackPythonBackend, PackTypeScript, PackReact}
+
+var packContent = map[string]string{}
+
+func init() {
+	for _, name := range packOrder {
+		raw, err := packsFS.ReadFile("packs/" + name + ".md")
+		if err != nil {
+			panic(fmt.Sprintf("rule pack %s not embedded: %v", name, err))
+		}
+		packContent[name] = string(raw)
+	}
+}
+
+// PackNames returns every available pack name in prompt order.
+func PackNames() []string {
+	return append([]string{}, packOrder...)
+}
+
+// ValidPack reports whether name is a built-in rule pack.
+func ValidPack(name string) bool {
+	_, ok := packContent[name]
+	return ok
+}
+
+// DetectPacks selects the rule packs relevant to the changed file paths,
+// by extension. Core is always included.
+func DetectPacks(paths []string) []string {
+	need := map[string]bool{}
+	for _, p := range paths {
+		switch strings.ToLower(path.Ext(p)) {
+		case ".py":
+			need[PackPythonBackend] = true
+		case ".js", ".mjs", ".cjs", ".ts", ".mts", ".cts":
+			need[PackTypeScript] = true
+		case ".jsx", ".tsx":
+			need[PackTypeScript] = true
+			need[PackReact] = true
+		}
+	}
+	var out []string
+	for _, name := range packOrder {
+		if name == PackCore || need[name] {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// NormalizePacks dedupes an explicit pack list, forces core in, and puts
+// the packs in prompt order.
+func NormalizePacks(names []string) []string {
+	want := map[string]bool{PackCore: true}
+	for _, n := range names {
+		want[n] = true
+	}
+	var out []string
+	for _, name := range packOrder {
+		if want[name] {
+			out = append(out, name)
+		}
+	}
+	return out
+}
 
 // SystemPrompt fixes the reviewer persona and the output contract.
-const SystemPrompt = `You are a strict, senior backend code reviewer for pull requests.
+const SystemPrompt = `You are a strict, senior code reviewer for pull requests.
 
 You will receive review rules and a unified diff. Report only real, actionable problems introduced or touched by this diff. Do not praise, do not summarize, do not restate the diff.
 
@@ -38,16 +115,18 @@ type FileDiff struct {
 	Truncated bool
 }
 
-// BuildUserPrompt assembles the generic rules, repo-specific rules, and the
-// diff into clearly labeled sections so the model treats the generic set as
-// baseline and the repo set as addition. Files dropped for the total token
-// budget are listed so the model doesn't assume it saw the whole PR.
-func BuildUserPrompt(customRules []string, files []FileDiff, omitted []string) string {
+// BuildUserPrompt assembles the active rule packs, repo-specific rules, and
+// the diff into clearly labeled sections so the model treats the built-in
+// packs as baseline and the repo set as addition. Files dropped for the
+// total token budget are listed so the model doesn't assume it saw the
+// whole PR.
+func BuildUserPrompt(packs []string, customRules []string, files []FileDiff, omitted []string) string {
 	var b strings.Builder
 
-	b.WriteString("# Generic backend rules\n\n")
-	b.WriteString(strings.TrimSpace(DefaultRules))
-	b.WriteString("\n\n")
+	for _, p := range packs {
+		b.WriteString(strings.TrimSpace(packContent[p]))
+		b.WriteString("\n\n")
+	}
 
 	if len(customRules) > 0 {
 		b.WriteString("# Repo-specific rules (additions to the baseline)\n\n")

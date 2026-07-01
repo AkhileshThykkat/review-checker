@@ -127,8 +127,22 @@ func run(ctx context.Context, configPath string) error {
 		}
 	}
 
+	// Rule packs: pinned in config, else auto-detected from the files under
+	// review — a pure-Python PR never pays prompt tokens for React rules.
+	var packs []string
+	if len(cfg.RulePacks) > 0 {
+		packs = rules.NormalizePacks(cfg.RulePacks)
+	} else {
+		paths := make([]string, len(files))
+		for i, f := range files {
+			paths[i] = f.Path
+		}
+		packs = rules.DetectPacks(paths)
+	}
+	log.Printf("rule packs: %s", strings.Join(packs, ", "))
+
 	llmClient := llm.NewOpenAICompat(cfg.LLM.BaseURL, apiKey, cfg.LLM.Model, cfg.LLM.Temperature)
-	response, usage, err := llmClient.Complete(ctx, rules.SystemPrompt, rules.BuildUserPrompt(cfg.CustomRules, diffs, omitted))
+	response, usage, err := llmClient.Complete(ctx, rules.SystemPrompt, rules.BuildUserPrompt(packs, cfg.CustomRules, diffs, omitted))
 	if err != nil {
 		return err
 	}

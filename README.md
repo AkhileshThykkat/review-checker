@@ -10,7 +10,7 @@ AI-powered pull request review as a reusable GitHub Action. On every PR it fetch
 - **Your diff is sent to the LLM provider you configure.** Changed code (patches, file paths) goes to that provider's API under *your* key and *their* data-usage terms. If your code is sensitive, pick a provider/endpoint that meets your policies (e.g. a self-hosted OpenAI-compatible server such as Ollama or vLLM works too).
 - **Each PR run costs LLM API tokens** — roughly the diff size plus the rules on input, findings on output. Small PRs are cheap; budget caps (`max_file_tokens`, `max_total_tokens`) bound the worst case.
 - **PR content influences the model.** Text inside a diff (comments, strings, docs) becomes part of the prompt, so a PR author can potentially steer or suppress review comments (prompt injection). Findings are advisory and non-blocking, which limits the blast radius — but it's another reason not to treat the output as authoritative.
-- **The built-in baseline rules target Python backends** (Django, FastAPI, Flask, plus general correctness/security). Other stacks work — the model reviews any diff — but you'll want `custom_rules` to carry more weight there.
+- **Built-in rules ship as stack-specific packs** — generic correctness/security (always on), Python backends (Django, FastAPI, Flask), JavaScript/TypeScript, and React (including design-system consistency: tokens over hardcoded values, variants over forked components). Packs are auto-selected from the files in the diff. Other stacks still work — the model reviews any diff — but `custom_rules` carries more weight there.
 
 ## Quick start
 
@@ -64,7 +64,7 @@ No checkout step is needed — the diff comes from the GitHub API, not the local
 
 1. Fetches the PR's changed files and patches via the GitHub API (`pulls/{n}/files`) — no shallow-clone/fetch-depth issues.
 2. Filters ignored paths: built-in defaults (migrations, lockfiles, `vendor/`, `node_modules/`, minified/generated files) plus your `ignore:` extensions.
-3. Builds one prompt from two rule tiers: **baseline rules** baked into the binary (Python-backend-focused; versioned with releases, improve on upgrade) and your repo's **`custom_rules`**.
+3. Builds one prompt from two rule tiers: **built-in rule packs** baked into the binary (versioned with releases, improve on upgrade) and your repo's **`custom_rules`**. Packs are auto-selected by the file types in the diff — `core` always, `python-backend` for `.py`, `typescript` for `.js`/`.ts`, `react` (with design-system rules) for `.jsx`/`.tsx` — so a pure-Python PR never spends prompt tokens on React rules. Pin the set explicitly with `rule_packs:`.
 4. Large diffs are truncated to a per-file token budget, with the truncation flagged in the prompt so the model doesn't guess about hidden context.
 5. The model returns findings as JSON (`file`, `line`, `severity`, `comment`). Each line number is translated to a GitHub diff position by parsing the patch hunks; findings pointing outside the diff are dropped.
 6. Re-runs are **incremental** by default: the reviewed head SHA is recorded (hidden) in the summary comment, and the next push reviews only files changed since — earlier line comments stay in place (GitHub marks them outdated as code moves), repeat findings are deduplicated by comment text, and the summary comment is edited in place. Force pushes and rebases automatically fall back to a full review. With `review_mode: full`, every push re-reviews the whole diff and supersedes all previous comments. (The summary is an issue comment, not a review body, precisely so it can be edited — submitted reviews can never be deleted.)
@@ -89,6 +89,7 @@ No checkout step is needed — the diff comes from the GitHub API, not the local
 | `review_mode` | no | `incremental` | What a re-run reviews: `incremental` = only files changed since the last reviewed commit, keeping earlier comments; `full` = the whole diff on every push, superseding previous comments |
 | `ignore` | no | `[]` | Glob patterns (doublestar `**` supported) added to built-in defaults |
 | `suppress` | no | `[]` | Rules that hide findings after review (false-positive lever): each entry has `path` (glob) and/or `text` (case-insensitive substring of the finding comment); when both are set, both must match |
+| `rule_packs` | no | auto-detect | Pin the built-in rule packs (`core`, `python-backend`, `typescript`, `react`); empty auto-detects from the diff's file extensions, `core` is always included |
 | `custom_rules` | no | `[]` | Repo-specific rules appended to the generic rules |
 | `max_file_tokens` | no | `8000` | Approximate per-file token budget before a file's diff is truncated |
 | `max_total_tokens` | no | `60000` | Approximate budget for the whole diff section; files past it are omitted from the review (listed as omitted in the prompt and logs) |
@@ -104,7 +105,7 @@ Unknown keys in the config are rejected — a typo like `custom_rule:` fails the
 
 ## Writing custom rules
 
-`custom_rules` entries are injected into the review prompt verbatim, as additions to the built-in generic rules (see [internal/rules/default_rules.md](internal/rules/default_rules.md) for the baseline — don't repeat what's already there). Each rule is one instruction the model applies to every file in the diff.
+`custom_rules` entries are injected into the review prompt verbatim, as additions to the built-in rule packs (see [internal/rules/packs/](internal/rules/packs/) for the baselines — don't repeat what's already there). Each rule is one instruction the model applies to every file in the diff.
 
 **Write rules that are:**
 
@@ -135,8 +136,8 @@ custom_rules:
 **Tips:**
 
 - Start with 3–7 rules covering your repo's recurring review comments; grow the list from real PR feedback.
-- If a rule is universal (applies to every backend repo), it belongs in the generic baseline — open a PR against `default_rules.md` here instead.
-- Rules don't disable the baseline; per-rule opt-out of generic rules isn't supported in v1.
+- If a rule is universal (applies to every repo on that stack), it belongs in the built-in packs — open a PR against the relevant file in `internal/rules/packs/` instead.
+- Rules don't disable the baseline; per-rule opt-out of built-in rules isn't supported in v1.
 - After editing rules, open a test PR with a known violation to confirm the model catches it.
 
 ## Suppressing false positives

@@ -7,9 +7,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/bmatcuk/doublestar/v4"
 	"gopkg.in/yaml.v3"
+
+	"github.com/akhileshthykkat/review-checker/internal/rules"
 )
 
 // LLM describes how to reach an OpenAI-compatible chat completions endpoint.
@@ -48,6 +51,11 @@ type Config struct {
 
 	// Suppress drops findings matching any rule before posting.
 	Suppress []SuppressRule `yaml:"suppress"`
+
+	// RulePacks pins which built-in rule packs to use. Empty (default)
+	// auto-detects from the changed files' extensions. "core" is always
+	// included either way.
+	RulePacks []string `yaml:"rule_packs"`
 
 	// CustomRules are repo-specific review rules appended to the generic
 	// rules baked into the binary.
@@ -144,6 +152,12 @@ func Parse(raw []byte, path string) (*Config, error) {
 		}
 		if r.Path != "" && !doublestar.ValidatePattern(r.Path) {
 			return nil, fmt.Errorf("%s: suppress[%d] path %q is not a valid glob", path, i, r.Path)
+		}
+	}
+	for _, p := range cfg.RulePacks {
+		if !rules.ValidPack(p) {
+			return nil, fmt.Errorf("%s: unknown rule pack %q (available: %s)",
+				path, p, strings.Join(rules.PackNames(), ", "))
 		}
 	}
 	if cfg.MaxFileTokens <= 0 {
