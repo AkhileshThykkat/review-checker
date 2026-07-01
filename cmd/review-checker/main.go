@@ -231,28 +231,26 @@ func resolveComments(findings []llm.Finding, positions map[string]map[int]int) [
 	seen := make(map[string]bool, len(findings))
 	var comments []gh.Comment
 	for _, f := range findings {
-		// Models sometimes prefix paths with ./ or / — positions are keyed
-		// by the exact path GitHub reported.
-		path := strings.TrimPrefix(strings.TrimPrefix(f.File, "./"), "/")
-
-		fileMap, ok := positions[path]
+		// Paths are already normalized by ParseFindings, so they match the
+		// exact paths GitHub reported.
+		fileMap, ok := positions[f.File]
 		if !ok {
 			log.Printf("dropping finding for unknown file %s", f.File)
 			continue
 		}
 		pos, ok := fileMap[f.Line]
 		if !ok {
-			log.Printf("dropping finding at %s:%d (line not in diff)", path, f.Line)
+			log.Printf("dropping finding at %s:%d (line not in diff)", f.File, f.Line)
 			continue
 		}
-		key := fmt.Sprintf("%s:%d:%s", path, f.Line, f.Comment)
+		key := fmt.Sprintf("%s:%d:%s", f.File, f.Line, f.Comment)
 		if seen[key] {
-			log.Printf("dropping duplicate finding at %s:%d", path, f.Line)
+			log.Printf("dropping duplicate finding at %s:%d", f.File, f.Line)
 			continue
 		}
 		seen[key] = true
 		comments = append(comments, gh.Comment{
-			Path:     path,
+			Path:     f.File,
 			Position: pos,
 			Body:     fmt.Sprintf("%s\n%s: %s", gh.Marker, badge[f.Severity], f.Comment),
 		})

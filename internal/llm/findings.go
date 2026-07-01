@@ -55,6 +55,9 @@ func ParseFindings(response string) ([]Finding, error) {
 
 	valid := findings[:0]
 	for _, f := range findings {
+		// Models sometimes prefix paths with ./ or / — normalize here so
+		// downstream matching against GitHub-reported paths is exact.
+		f.File = strings.TrimPrefix(strings.TrimPrefix(f.File, "./"), "/")
 		if f.File == "" || f.Line <= 0 || f.Comment == "" {
 			continue
 		}

@@ -68,6 +68,28 @@ func TestParseFindingsDropsInvalidAndDefaultsSeverity(t *testing.T) {
 	}
 }
 
+func TestParseFindingsNormalizesPaths(t *testing.T) {
+	in := `[
+		{"file":"./a.py","line":1,"severity":"warn","comment":"dot-slash prefix"},
+		{"file":"/b.py","line":2,"severity":"warn","comment":"slash prefix"},
+		{"file":"c.py","line":3,"severity":"warn","comment":"already clean"},
+		{"file":"./","line":4,"severity":"warn","comment":"empty after trim"}
+	]`
+	got, err := ParseFindings(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"a.py", "b.py", "c.py"}
+	if len(got) != len(want) {
+		t.Fatalf("want %d findings, got %+v", len(want), got)
+	}
+	for i, f := range got {
+		if f.File != want[i] {
+			t.Errorf("file[%d] = %q, want %q", i, f.File, want[i])
+		}
+	}
+}
+
 func TestParseFindingsGarbage(t *testing.T) {
 	if _, err := ParseFindings("I could not review this."); err == nil {
 		t.Error("want error for response without JSON array")
