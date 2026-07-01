@@ -2,7 +2,15 @@
 
 AI-powered pull request review as a reusable GitHub Action. On every PR it fetches the diff from the GitHub API, sends it to an LLM of your choice (any OpenAI-compatible endpoint — DeepSeek, OpenRouter, OpenAI, Groq, Together, Ollama, ...), and posts line-level review comments back on the PR.
 
-**v1 is non-blocking**: comments only, CI never fails on findings. Every finding is still severity-tagged (`block` / `warn` / `nit`) so a blocking mode can be added later without re-teaching the model.
+**v1 is non-blocking**: comments only, CI never fails on findings. Every finding is still severity-tagged (`block` / `warn` / `nit`) so a blocking mode could be added in a future version without re-teaching the model.
+
+## What to expect (read before adopting)
+
+- **This is an LLM reviewer — it will be wrong sometimes.** Expect occasional false positives (flagging fine code) and false negatives (missing real bugs). Treat comments as a first-pass filter, not a verdict. It does not replace human review.
+- **Your diff is sent to the LLM provider you configure.** Changed code (patches, file paths) goes to that provider's API under *your* key and *their* data-usage terms. If your code is sensitive, pick a provider/endpoint that meets your policies (e.g. a self-hosted OpenAI-compatible server such as Ollama or vLLM works too).
+- **Each PR run costs LLM API tokens** — roughly the diff size plus the rules on input, findings on output. Small PRs are cheap; budget caps (`max_file_tokens`, `max_total_tokens`) bound the worst case.
+- **PR content influences the model.** Text inside a diff (comments, strings, docs) becomes part of the prompt, so a PR author can potentially steer or suppress review comments (prompt injection). Findings are advisory and non-blocking, which limits the blast radius — but it's another reason not to treat the output as authoritative.
+- **The built-in baseline rules target Python backends** (Django, FastAPI, Flask, plus general correctness/security). Other stacks work — the model reviews any diff — but you'll want `custom_rules` to carry more weight there.
 
 ## Quick start
 
@@ -56,7 +64,7 @@ No checkout step is needed — the diff comes from the GitHub API, not the local
 
 1. Fetches the PR's changed files and patches via the GitHub API (`pulls/{n}/files`) — no shallow-clone/fetch-depth issues.
 2. Filters ignored paths: built-in defaults (migrations, lockfiles, `vendor/`, `node_modules/`, minified/generated files) plus your `ignore:` extensions.
-3. Builds one prompt from two rule tiers: **generic backend rules** baked into the binary (versioned with releases, improve on upgrade) and your repo's **`custom_rules`**.
+3. Builds one prompt from two rule tiers: **baseline rules** baked into the binary (Python-backend-focused; versioned with releases, improve on upgrade) and your repo's **`custom_rules`**.
 4. Large diffs are truncated to a per-file token budget, with the truncation flagged in the prompt so the model doesn't guess about hidden context.
 5. The model returns findings as JSON (`file`, `line`, `severity`, `comment`). Each line number is translated to a GitHub diff position by parsing the patch hunks; findings pointing outside the diff are dropped.
 6. Comments from previous runs are superseded: on a new push the old line comments and the old summary comment are deleted and fresh ones posted. (The summary is an issue comment, not a review body, precisely so it can be cleaned up — submitted reviews can never be deleted.)
@@ -65,7 +73,8 @@ No checkout step is needed — the diff comes from the GitHub API, not the local
 
 - **PRs from forks are not supported.** On `pull_request` events from a fork, GitHub gives the workflow a read-only `GITHUB_TOKEN` and no secrets — the action can neither call your LLM nor post comments. Works for branches within the same repo (the normal setup for private/team repos).
 - Findings the model reports on lines outside the diff are dropped (GitHub can't anchor them); the run log lists every dropped finding.
-- GitHub Enterprise Server is supported automatically: the action honors the `GITHUB_API_URL` env var that Actions sets on GHES runners.
+- GitHub Enterprise Server: the action honors the `GITHUB_API_URL` env var that Actions sets on GHES runners, but this path is not regularly tested — please open an issue if it misbehaves.
+- Only files with textual patches are reviewed; binary files and files GitHub returns no patch for are skipped. Very large PRs are reviewed partially under `max_total_tokens` (omitted files are listed in the run log).
 
 ## Configuration reference
 
@@ -156,7 +165,7 @@ go test ./...
 go build ./cmd/review-checker
 ```
 
-Releases: push a tag `vX.Y.Z` — the release workflow builds static binaries for linux/darwin × amd64/arm64 and publishes them; `action.yml` downloads the pinned binary at run time (~1–2 s, no Docker pull).
+Releases: push a tag `vX.Y.Z` — the release workflow builds static binaries for linux/darwin × amd64/arm64 and publishes them; `action.yml` downloads the pinned binary at run time (a small download, no Docker image to pull or build).
 
 ## License
 
