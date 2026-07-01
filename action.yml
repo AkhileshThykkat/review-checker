@@ -11,9 +11,9 @@ inputs:
     required: false
     default: '.review-checker.yaml'
   version:
-    description: 'review-checker release version to download (e.g. v0.1.0). Defaults to the version this action tag ships with.'
+    description: 'review-checker release version to download (e.g. v0.2.0). Defaults to the version this action tag ships with.'
     required: false
-    default: 'v0.1.2'
+    default: 'v0.2.0'
 
 runs:
   using: 'composite'
