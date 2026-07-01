@@ -1,0 +1,6 @@
+dist/
+/review-checker
+*.test
+.env
+.claude/
+stateful-wobbling-pebble.md

@@ -1,0 +1,198 @@
+// review-checker fetches a PR's diff from the GitHub API, asks an
+// OpenAI-compatible LLM to review it against generic + repo-specific rules,
+// and posts line-level review comments back. v1 is non-blocking: comments
+// only, CI never fails on findings.
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"log"
+	"os"
+	"strings"
+
+	"github.com/bmatcuk/doublestar/v4"
+
+	"github.com/akhileshthykkat/review-checker/internal/config"
+	"github.com/akhileshthykkat/review-checker/internal/gh"
+	"github.com/akhileshthykkat/review-checker/internal/llm"
+	"github.com/akhileshthykkat/review-checker/internal/rules"
+)
+
+func main() {
+	log.SetFlags(0)
+	log.SetPrefix("review-checker: ")
+
+	configPath := flag.String("config", ".review-checker.yaml", "path to config file")
+	flag.Parse()
+
+	if err := run(context.Background(), *configPath); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run(ctx context.Context, configPath string) error {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return err
+	}
+
+	apiKey := os.Getenv(cfg.LLM.APIKeyEnv)
+	if apiKey == "" {
+		return fmt.Errorf("env var %s (llm.api_key_env) is empty — pass the secret through the workflow env", cfg.LLM.APIKeyEnv)
+	}
+	token := os.Getenv("GITHUB_TOKEN")
+	if token == "" {
+		return fmt.Errorf("GITHUB_TOKEN is empty — pass it through the workflow env")
+	}
+
+	owner, repo, prNumber, err := githubContext()
+	if err != nil {
+		return err
+	}
+	log.Printf("reviewing %s/%s#%d with %s", owner, repo, prNumber, cfg.LLM.Model)
+
+	client := gh.NewClient(token, owner, repo, prNumber)
+
+	files, err := client.ChangedFiles(ctx)
+	if err != nil {
+		return err
+	}
+	files = filterIgnored(files, cfg.IgnoreGlobs())
+	if len(files) == 0 {
+		log.Print("no reviewable files in diff, nothing to do")
+		return nil
+	}
+	log.Printf("%d file(s) to review", len(files))
+
+	// Build prompt with per-file token budget.
+	diffs := make([]rules.FileDiff, 0, len(files))
+	positions := make(map[string]map[int]int, len(files))
+	for _, f := range files {
+		patch, truncated := rules.TruncatePatch(f.Patch, cfg.MaxFileTokens)
+		if truncated {
+			log.Printf("truncated %s to ~%d tokens", f.Path, cfg.MaxFileTokens)
+		}
+		diffs = append(diffs, rules.FileDiff{Path: f.Path, Patch: patch, Truncated: truncated})
+		// Positions are mapped from the truncated patch: the model only saw
+		// that much, and a position past the cut would be invalid anyway.
+		positions[f.Path] = gh.BuildPositionMap(patch)
+	}
+
+	llmClient := llm.NewOpenAICompat(cfg.LLM.BaseURL, apiKey, cfg.LLM.Model)
+	response, err := llmClient.Complete(ctx, rules.SystemPrompt, rules.BuildUserPrompt(cfg.CustomRules, diffs))
+	if err != nil {
+		return err
+	}
+
+	findings, err := llm.ParseFindings(response)
+	if err != nil {
+		return err
+	}
+	log.Printf("model reported %d finding(s)", len(findings))
+
+	comments := resolveComments(findings, positions)
+	if dropped := len(findings) - len(comments); dropped > 0 {
+		log.Printf("dropped %d finding(s) pointing outside the diff", dropped)
+	}
+
+	if err := client.DeleteStaleComments(ctx); err != nil {
+		return err
+	}
+
+	if len(comments) == 0 {
+		log.Print("no postable findings, skipping review")
+		return nil
+	}
+
+	summary := fmt.Sprintf("%s\n**review-checker** found %d issue(s). Severity is informational in v1 — this check never blocks CI.", gh.Marker, len(comments))
+	if err := client.PostReview(ctx, summary, comments); err != nil {
+		return err
+	}
+	log.Printf("posted review with %d comment(s)", len(comments))
+	return nil
+}
+
+// githubContext resolves owner, repo, and PR number from Actions env:
+// GITHUB_REPOSITORY ("owner/repo") and the pull_request event payload.
+func githubContext() (owner, repo string, prNumber int, err error) {
+	full := os.Getenv("GITHUB_REPOSITORY")
+	owner, repo, ok := strings.Cut(full, "/")
+	if !ok {
+		return "", "", 0, fmt.Errorf("GITHUB_REPOSITORY malformed or unset: %q", full)
+	}
+
+	eventPath := os.Getenv("GITHUB_EVENT_PATH")
+	if eventPath == "" {
+		return "", "", 0, fmt.Errorf("GITHUB_EVENT_PATH unset — must run inside GitHub Actions on a pull_request event")
+	}
+	raw, err := os.ReadFile(eventPath)
+	if err != nil {
+		return "", "", 0, fmt.Errorf("read event payload: %w", err)
+	}
+	var event struct {
+		PullRequest struct {
+			Number int `json:"number"`
+		} `json:"pull_request"`
+	}
+	if err := json.Unmarshal(raw, &event); err != nil {
+		return "", "", 0, fmt.Errorf("parse event payload: %w", err)
+	}
+	if event.PullRequest.Number == 0 {
+		return "", "", 0, fmt.Errorf("no pull_request in event payload — trigger the workflow on pull_request events")
+	}
+	return owner, repo, event.PullRequest.Number, nil
+}
+
+func filterIgnored(files []gh.PRFile, globs []string) []gh.PRFile {
+	kept := files[:0]
+	for _, f := range files {
+		if matchesAny(f.Path, globs) {
+			log.Printf("skipping %s (ignored)", f.Path)
+			continue
+		}
+		kept = append(kept, f)
+	}
+	return kept
+}
+
+func matchesAny(path string, globs []string) bool {
+	for _, g := range globs {
+		if ok, err := doublestar.Match(g, path); err == nil && ok {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveComments translates model findings (file + new-file line) into
+// GitHub diff positions, dropping any finding the diff cannot anchor.
+func resolveComments(findings []llm.Finding, positions map[string]map[int]int) []gh.Comment {
+	badge := map[string]string{
+		llm.SeverityBlock: "🔴 **block**",
+		llm.SeverityWarn:  "🟡 **warn**",
+		llm.SeverityNit:   "🔵 **nit**",
+	}
+
+	var comments []gh.Comment
+	for _, f := range findings {
+		fileMap, ok := positions[f.File]
+		if !ok {
+			log.Printf("dropping finding for unknown file %s", f.File)
+			continue
+		}
+		pos, ok := fileMap[f.Line]
+		if !ok {
+			log.Printf("dropping finding at %s:%d (line not in diff)", f.File, f.Line)
+			continue
+		}
+		comments = append(comments, gh.Comment{
+			Path:     f.File,
+			Position: pos,
+			Body:     fmt.Sprintf("%s\n%s: %s", gh.Marker, badge[f.Severity], f.Comment),
+		})
+	}
+	return comments
+}

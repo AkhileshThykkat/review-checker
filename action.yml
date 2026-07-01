@@ -1,0 +1,47 @@
+name: 'review-checker'
+description: 'AI-powered PR review: sends the diff to any OpenAI-compatible LLM and posts line-level review comments. Non-blocking.'
+author: 'akhileshthykkat'
+branding:
+  icon: 'eye'
+  color: 'purple'
+
+inputs:
+  config:
+    description: 'Path to the repo''s .review-checker.yaml'
+    required: false
+    default: '.review-checker.yaml'
+  version:
+    description: 'review-checker release version to download (e.g. v0.1.0). Defaults to the version this action tag ships with.'
+    required: false
+    default: 'v0.1.0'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Download review-checker binary
+      shell: bash
+      run: |
+        set -euo pipefail
+        VERSION="${{ inputs.version }}"
+        case "$(uname -s)" in
+          Linux)  OS=linux ;;
+          Darwin) OS=darwin ;;
+          *) echo "unsupported OS: $(uname -s)"; exit 1 ;;
+        esac
+        case "$(uname -m)" in
+          x86_64)        ARCH=amd64 ;;
+          aarch64|arm64) ARCH=arm64 ;;
+          *) echo "unsupported arch: $(uname -m)"; exit 1 ;;
+        esac
+        ASSET="review-checker_${OS}_${ARCH}"
+        URL="https://github.com/akhileshthykkat/review-checker/releases/download/${VERSION}/${ASSET}"
+        echo "downloading ${URL}"
+        BIN_DIR="${RUNNER_TEMP}/review-checker"
+        mkdir -p "${BIN_DIR}"
+        curl -fsSL --retry 3 -o "${BIN_DIR}/review-checker" "${URL}"
+        chmod +x "${BIN_DIR}/review-checker"
+        echo "${BIN_DIR}" >> "${GITHUB_PATH}"
+
+    - name: Run review-checker
+      shell: bash
+      run: review-checker -config "${{ inputs.config }}"

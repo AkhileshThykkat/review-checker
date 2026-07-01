@@ -1,0 +1,30 @@
+# Example .review-checker.yaml — copy into your repo root and adjust.
+
+llm:
+  # Any OpenAI-compatible chat completions endpoint works:
+  # DeepSeek, OpenRouter, OpenAI, Groq, Together, Ollama, Anthropic compat.
+  base_url: https://api.deepseek.com/v1
+  # Name of the env var holding the API key (set it in the workflow env
+  # from a repo secret) — never put the raw key here.
+  api_key_env: DEEPSEEK_API_KEY
+  model: deepseek-chat
+
+# v1 supports comment_only: findings are posted as comments, CI never fails.
+mode: comment_only
+
+# Extends the built-in ignore list (migrations, lockfiles, vendor/,
+# node_modules/, minified and generated files are always skipped).
+ignore:
+  - "docs/**"
+  - "**/fixtures/*.json"
+
+# Repo-specific rules, appended to the generic rules baked into the binary.
+# One instruction per line: actionable, diff-detectable, single concern.
+# See README "Writing custom rules" for guidelines and examples.
+custom_rules:
+  - "Flag any raw SQL string formatting (SQL injection risk)."
+  - "Require select_related/prefetch_related on FK/M2M access in list views."
+
+# Approximate per-file token budget before a file's diff is truncated
+# in the prompt. Default: 8000.
+# max_file_tokens: 8000
