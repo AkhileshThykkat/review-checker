@@ -12,6 +12,11 @@ llm:
 # v1 supports comment_only: findings are posted as comments, CI never fails.
 mode: comment_only
 
+# What a re-run reviews. "incremental" (default): only files changed since
+# the last reviewed commit, keeping earlier comments. "full": re-review the
+# whole diff and supersede all previous comments on every push.
+# review_mode: incremental
+
 # Extends the built-in ignore list (migrations, lockfiles, vendor/,
 # node_modules/, minified and generated files are always skipped).
 ignore:

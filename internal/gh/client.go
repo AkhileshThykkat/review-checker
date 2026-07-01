@@ -96,68 +96,128 @@ func (c *Client) ChangedFiles(ctx context.Context) ([]PRFile, error) {
 	return files, nil
 }
 
-// DeleteStaleComments removes line comments and summary comments from
-// previous runs, identified by Marker. Called before posting fresh ones
-// (dismiss/supersede, v1).
-func (c *Client) DeleteStaleComments(ctx context.Context) error {
-	// Line comments (pull request review comments).
-	var staleLine []int64
-	lineOpt := &github.PullRequestListCommentsOptions{
+// BotComment is a line comment posted by a previous run, identified by
+// Marker. Used to supersede (full mode) or dedupe against (incremental
+// mode) earlier findings.
+type BotComment struct {
+	ID   int64
+	Path string
+	Body string
+}
+
+// ListBotLineComments returns the line comments posted by previous runs.
+func (c *Client) ListBotLineComments(ctx context.Context) ([]BotComment, error) {
+	var out []BotComment
+	opt := &github.PullRequestListCommentsOptions{
 		ListOptions: github.ListOptions{PerPage: 100},
 	}
 	for {
-		comments, resp, err := c.api.PullRequests.ListComments(ctx, c.owner, c.repo, c.number, lineOpt)
+		comments, resp, err := c.api.PullRequests.ListComments(ctx, c.owner, c.repo, c.number, opt)
 		if err != nil {
-			return fmt.Errorf("list review comments: %w", err)
+			return nil, fmt.Errorf("list review comments: %w", err)
 		}
 		for _, cm := range comments {
 			if strings.Contains(cm.GetBody(), Marker) {
-				staleLine = append(staleLine, cm.GetID())
+				out = append(out, BotComment{ID: cm.GetID(), Path: cm.GetPath(), Body: cm.GetBody()})
 			}
 		}
 		if resp.NextPage == 0 {
 			break
 		}
-		lineOpt.Page = resp.NextPage
+		opt.Page = resp.NextPage
 	}
+	return out, nil
+}
 
-	// Summary comments (issue comments on the PR conversation).
-	var staleIssue []int64
-	issueOpt := &github.IssueListCommentsOptions{
+// DeleteLineComments removes previous-run line comments (full-review mode).
+// Best effort: a stale comment we cannot delete should not block posting
+// the fresh review.
+func (c *Client) DeleteLineComments(ctx context.Context, comments []BotComment) {
+	for _, cm := range comments {
+		if _, err := c.api.PullRequests.DeleteComment(ctx, c.owner, c.repo, cm.ID); err != nil {
+			log.Printf("warn: delete stale line comment %d: %v", cm.ID, err)
+		}
+	}
+	if len(comments) > 0 {
+		log.Printf("superseded %d stale comment(s) from previous run", len(comments))
+	}
+}
+
+// FindSummaryComment returns the id and body of the summary comment from a
+// previous run, or 0 when there is none. Duplicates — possible when a past
+// UpsertSummary fell back from edit to create — are deleted best-effort so
+// the PR self-heals to a single summary.
+func (c *Client) FindSummaryComment(ctx context.Context) (int64, string, error) {
+	var found []*github.IssueComment
+	opt := &github.IssueListCommentsOptions{
 		ListOptions: github.ListOptions{PerPage: 100},
 	}
 	for {
-		comments, resp, err := c.api.Issues.ListComments(ctx, c.owner, c.repo, c.number, issueOpt)
+		comments, resp, err := c.api.Issues.ListComments(ctx, c.owner, c.repo, c.number, opt)
 		if err != nil {
-			return fmt.Errorf("list issue comments: %w", err)
+			return 0, "", fmt.Errorf("list issue comments: %w", err)
 		}
 		for _, cm := range comments {
 			if strings.Contains(cm.GetBody(), Marker) {
-				staleIssue = append(staleIssue, cm.GetID())
+				found = append(found, cm)
 			}
 		}
 		if resp.NextPage == 0 {
 			break
 		}
-		issueOpt.Page = resp.NextPage
+		opt.Page = resp.NextPage
 	}
+	if len(found) == 0 {
+		return 0, "", nil
+	}
+	for _, cm := range found[1:] {
+		if _, err := c.api.Issues.DeleteComment(ctx, c.owner, c.repo, cm.GetID()); err != nil {
+			log.Printf("warn: delete duplicate summary comment %d: %v", cm.GetID(), err)
+		}
+	}
+	return found[0].GetID(), found[0].GetBody(), nil
+}
 
-	// Best effort: a stale comment we cannot delete should not block
-	// posting the fresh review.
-	for _, id := range staleLine {
-		if _, err := c.api.PullRequests.DeleteComment(ctx, c.owner, c.repo, id); err != nil {
-			log.Printf("warn: delete stale line comment %d: %v", id, err)
+// UpsertSummary edits the previous summary comment in place — keeps its
+// position in the conversation and avoids a delete/create notification per
+// push — or creates it on the first run.
+func (c *Client) UpsertSummary(ctx context.Context, id int64, body string) error {
+	if id != 0 {
+		comment := &github.IssueComment{Body: github.String(body)}
+		if _, _, err := c.api.Issues.EditComment(ctx, c.owner, c.repo, id, comment); err == nil {
+			return nil
+		} else {
+			log.Printf("warn: edit summary comment %d failed, creating a new one: %v", id, err)
 		}
 	}
-	for _, id := range staleIssue {
-		if _, err := c.api.Issues.DeleteComment(ctx, c.owner, c.repo, id); err != nil {
-			log.Printf("warn: delete stale summary comment %d: %v", id, err)
+	return c.PostSummary(ctx, body)
+}
+
+// ChangedSince returns the files changed between base and head. ok is false
+// when the range cannot anchor an incremental review — base unknown (force
+// push), history diverged (rebase), or the API call failed — and the caller
+// should fall back to a full review.
+func (c *Client) ChangedSince(ctx context.Context, base, head string) (files []string, ok bool) {
+	opt := &github.ListOptions{PerPage: 100}
+	for {
+		cmp, resp, err := c.api.Repositories.CompareCommits(ctx, c.owner, c.repo, base, head, opt)
+		if err != nil {
+			log.Printf("compare %.7s...%.7s failed, falling back to full review: %v", base, head, err)
+			return nil, false
 		}
+		if s := cmp.GetStatus(); s != "ahead" && s != "identical" {
+			log.Printf("history rewritten since last review (compare status %q), falling back to full review", s)
+			return nil, false
+		}
+		for _, f := range cmp.Files {
+			files = append(files, f.GetFilename())
+		}
+		if resp.NextPage == 0 {
+			break
+		}
+		opt.Page = resp.NextPage
 	}
-	if n := len(staleLine) + len(staleIssue); n > 0 {
-		log.Printf("superseded %d stale comment(s) from previous run", n)
-	}
-	return nil
+	return files, true
 }
 
 // PostReview submits one review containing all line comments, as a

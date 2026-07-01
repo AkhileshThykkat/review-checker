@@ -63,6 +63,28 @@ func TestParseRejectsUnsupportedMode(t *testing.T) {
 	}
 }
 
+func TestParseReviewMode(t *testing.T) {
+	cfg, err := Parse([]byte(validYAML), "test.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ReviewMode != ReviewModeIncremental {
+		t.Errorf("review_mode: got %q, want default %q", cfg.ReviewMode, ReviewModeIncremental)
+	}
+
+	cfg, err = Parse([]byte(validYAML+"review_mode: full\n"), "test.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ReviewMode != ReviewModeFull {
+		t.Errorf("review_mode: got %q, want %q", cfg.ReviewMode, ReviewModeFull)
+	}
+
+	if _, err := Parse([]byte(validYAML+"review_mode: partial\n"), "test.yaml"); err == nil {
+		t.Error("want error for unsupported review_mode")
+	}
+}
+
 func TestParseSuppress(t *testing.T) {
 	yaml := validYAML + `
 suppress:

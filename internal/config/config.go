@@ -37,6 +37,12 @@ type Config struct {
 	LLM  LLM    `yaml:"llm"`
 	Mode string `yaml:"mode"`
 
+	// ReviewMode selects what a re-run reviews: "incremental" (default)
+	// reviews only files changed since the last reviewed commit and keeps
+	// earlier comments; "full" re-reviews the whole diff and supersedes
+	// all previous comments.
+	ReviewMode string `yaml:"review_mode"`
+
 	// Ignore extends the built-in default ignore globs.
 	Ignore []string `yaml:"ignore"`
 
@@ -78,6 +84,9 @@ var DefaultIgnore = []string{
 
 const (
 	ModeCommentOnly = "comment_only"
+
+	ReviewModeIncremental = "incremental"
+	ReviewModeFull        = "full"
 
 	defaultMaxFileTokens  = 8000
 	defaultMaxTotalTokens = 60000
@@ -121,6 +130,13 @@ func Parse(raw []byte, path string) (*Config, error) {
 	}
 	if cfg.Mode != ModeCommentOnly {
 		return nil, fmt.Errorf("%s: mode %q not supported in v1 (only %q)", path, cfg.Mode, ModeCommentOnly)
+	}
+	if cfg.ReviewMode == "" {
+		cfg.ReviewMode = ReviewModeIncremental
+	}
+	if cfg.ReviewMode != ReviewModeIncremental && cfg.ReviewMode != ReviewModeFull {
+		return nil, fmt.Errorf("%s: review_mode %q not supported (only %q or %q)",
+			path, cfg.ReviewMode, ReviewModeIncremental, ReviewModeFull)
 	}
 	for i, r := range cfg.Suppress {
 		if r.Path == "" && r.Text == "" {

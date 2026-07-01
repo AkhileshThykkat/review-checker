@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/bmatcuk/doublestar/v4"
@@ -68,6 +69,30 @@ func run(ctx context.Context, configPath string) error {
 		log.Print("no reviewable files in diff, nothing to do")
 		return nil
 	}
+
+	// Incremental mode: review only what changed since the last reviewed
+	// commit (recorded in the summary comment). Anything that makes the
+	// range untrustworthy — no previous run, force push, rebase — falls
+	// back to a full review.
+	summaryID, summaryBody, err := client.FindSummaryComment(ctx)
+	if err != nil {
+		return err
+	}
+	prevSHA := parseSHAMarker(summaryBody)
+	incremental := cfg.ReviewMode == config.ReviewModeIncremental && prevSHA != ""
+	if incremental {
+		changed, ok := client.ChangedSince(ctx, prevSHA, pr.headSHA)
+		if !ok {
+			incremental = false
+		} else {
+			files = filterUnchanged(files, changed)
+			log.Printf("incremental review since %.7s", prevSHA)
+			if len(files) == 0 {
+				log.Print("no reviewable files changed since last reviewed commit — nothing to do (set review_mode: full to force a re-review)")
+				return nil
+			}
+		}
+	}
 	log.Printf("%d file(s) to review", len(files))
 
 	// Build prompt under per-file and total token budgets. Once the total
@@ -97,6 +122,9 @@ func run(ctx context.Context, configPath string) error {
 	if len(omitted) > 0 {
 		log.Printf("omitted %d file(s) over the ~%d total token budget: %s",
 			len(omitted), cfg.MaxTotalTokens, strings.Join(omitted, ", "))
+		if incremental {
+			log.Print("note: omitted files will not be revisited until they change again — set review_mode: full to force a complete pass")
+		}
 	}
 
 	llmClient := llm.NewOpenAICompat(cfg.LLM.BaseURL, apiKey, cfg.LLM.Model, cfg.LLM.Temperature)
@@ -116,24 +144,37 @@ func run(ctx context.Context, configPath string) error {
 	log.Printf("model reported %d finding(s)", len(findings))
 	findings = filterSuppressed(findings, cfg.Suppress)
 
+	existing, err := client.ListBotLineComments(ctx)
+	if err != nil {
+		return err
+	}
+	if incremental {
+		findings = dropAlreadyPosted(findings, existing)
+	}
+
 	comments, counts := resolveComments(findings, positions)
 	if dropped := len(findings) - len(comments); dropped > 0 {
 		log.Printf("dropped %d finding(s) pointing outside the diff", dropped)
 	}
 
-	if err := client.DeleteStaleComments(ctx); err != nil {
-		return err
+	if !incremental {
+		client.DeleteLineComments(ctx, existing)
 	}
 
-	if len(comments) == 0 {
-		log.Print("no postable findings, skipping review")
-		return nil
+	if len(comments) > 0 {
+		if err := client.PostReview(ctx, comments); err != nil {
+			return err
+		}
 	}
 
-	if err := client.PostReview(ctx, comments); err != nil {
-		return err
+	// The summary is always upserted: it records the reviewed head SHA the
+	// next incremental run anchors to.
+	sinceSHA := ""
+	if incremental {
+		sinceSHA = prevSHA
 	}
-	if err := client.PostSummary(ctx, buildSummary(cfg.LLM.Model, counts, usage)); err != nil {
+	summary := buildSummary(cfg.LLM.Model, counts, usage, pr.headSHA, sinceSHA)
+	if err := client.UpsertSummary(ctx, summaryID, summary); err != nil {
 		return err
 	}
 	log.Printf("posted review with %d comment(s)", len(comments))
@@ -201,6 +242,38 @@ func loadConfig(ctx context.Context, client *gh.Client, path, ref string) (*conf
 	return config.Parse(raw, path)
 }
 
+// shaMarkerRe extracts the last-reviewed head SHA embedded in the summary
+// comment, which anchors the next incremental run.
+var shaMarkerRe = regexp.MustCompile(`<!-- rc-sha:([0-9a-f]{7,40}) -->`)
+
+func shaMarker(sha string) string {
+	return fmt.Sprintf("<!-- rc-sha:%s -->", sha)
+}
+
+func parseSHAMarker(body string) string {
+	if m := shaMarkerRe.FindStringSubmatch(body); m != nil {
+		return m[1]
+	}
+	return ""
+}
+
+// filterUnchanged keeps only the PR files also touched since the last
+// reviewed commit.
+func filterUnchanged(files []gh.PRFile, changed []string) []gh.PRFile {
+	touched := make(map[string]bool, len(changed))
+	for _, p := range changed {
+		touched[p] = true
+	}
+	kept := files[:0]
+	for _, f := range files {
+		if !touched[f.Path] {
+			continue
+		}
+		kept = append(kept, f)
+	}
+	return kept
+}
+
 // filterSuppressed drops findings matching a suppress rule. Unlike ignore
 // globs (file never sent for review), suppression hides a finding after
 // the review — the lever for recurring false positives.
@@ -232,6 +305,29 @@ func suppressed(f llm.Finding, rules []config.SuppressRule) bool {
 		return true
 	}
 	return false
+}
+
+// dropAlreadyPosted removes findings already on the PR from a previous
+// incremental run. The fingerprint is path + finding text — the severity
+// badge is ignored so a re-graded repeat still counts as a duplicate.
+func dropAlreadyPosted(findings []llm.Finding, existing []gh.BotComment) []llm.Finding {
+	posted := make(map[string]bool, len(existing))
+	for _, e := range existing {
+		text := e.Body
+		if i := strings.Index(text, "**: "); i >= 0 {
+			text = text[i+len("**: "):]
+		}
+		posted[e.Path+"\x00"+strings.TrimSpace(text)] = true
+	}
+	kept := findings[:0]
+	for _, f := range findings {
+		if posted[f.File+"\x00"+strings.TrimSpace(f.Comment)] {
+			log.Printf("skipping already-posted finding at %s:%d", f.File, f.Line)
+			continue
+		}
+		kept = append(kept, f)
+	}
+	return kept
 }
 
 func filterIgnored(files []gh.PRFile, globs []string) []gh.PRFile {
@@ -299,8 +395,10 @@ func resolveComments(findings []llm.Finding, positions map[string]map[int]int) (
 
 // buildSummary renders the PR conversation comment: severity breakdown,
 // model, and provider-reported token usage (omitted when the provider
-// doesn't return a usage block).
-func buildSummary(model string, counts map[string]int, usage llm.Usage) string {
+// doesn't return a usage block). headSHA is embedded as a hidden marker so
+// the next incremental run knows what was last reviewed; a non-empty
+// sinceSHA phrases the counts as new-since-last-review.
+func buildSummary(model string, counts map[string]int, usage llm.Usage, headSHA, sinceSHA string) string {
 	total := counts[llm.SeverityBlock] + counts[llm.SeverityWarn] + counts[llm.SeverityNit]
 
 	var parts []string
@@ -315,7 +413,12 @@ func buildSummary(model string, counts map[string]int, usage llm.Usage) string {
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s\n**review-checker** found %d issue(s)", gh.Marker, total)
+	fmt.Fprintf(&b, "%s\n%s\n", gh.Marker, shaMarker(headSHA))
+	if sinceSHA != "" {
+		fmt.Fprintf(&b, "**review-checker** found %d new issue(s) since `%.7s`", total, sinceSHA)
+	} else {
+		fmt.Fprintf(&b, "**review-checker** found %d issue(s)", total)
+	}
 	if len(parts) > 0 {
 		fmt.Fprintf(&b, ": %s", strings.Join(parts, " · "))
 	}

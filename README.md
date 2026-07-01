@@ -67,7 +67,7 @@ No checkout step is needed — the diff comes from the GitHub API, not the local
 3. Builds one prompt from two rule tiers: **baseline rules** baked into the binary (Python-backend-focused; versioned with releases, improve on upgrade) and your repo's **`custom_rules`**.
 4. Large diffs are truncated to a per-file token budget, with the truncation flagged in the prompt so the model doesn't guess about hidden context.
 5. The model returns findings as JSON (`file`, `line`, `severity`, `comment`). Each line number is translated to a GitHub diff position by parsing the patch hunks; findings pointing outside the diff are dropped.
-6. Comments from previous runs are superseded: on a new push the old line comments and the old summary comment are deleted and fresh ones posted. (The summary is an issue comment, not a review body, precisely so it can be cleaned up — submitted reviews can never be deleted.)
+6. Re-runs are **incremental** by default: the reviewed head SHA is recorded (hidden) in the summary comment, and the next push reviews only files changed since — earlier line comments stay in place (GitHub marks them outdated as code moves), repeat findings are deduplicated by comment text, and the summary comment is edited in place. Force pushes and rebases automatically fall back to a full review. With `review_mode: full`, every push re-reviews the whole diff and supersedes all previous comments. (The summary is an issue comment, not a review body, precisely so it can be edited — submitted reviews can never be deleted.)
 
 ## Limitations
 
@@ -75,6 +75,7 @@ No checkout step is needed — the diff comes from the GitHub API, not the local
 - Findings the model reports on lines outside the diff are dropped (GitHub can't anchor them); the run log lists every dropped finding.
 - GitHub Enterprise Server: the action honors the `GITHUB_API_URL` env var that Actions sets on GHES runners, but this path is not regularly tested — please open an issue if it misbehaves.
 - Only files with textual patches are reviewed; binary files and files GitHub returns no patch for are skipped. Very large PRs are reviewed partially under `max_total_tokens` (omitted files are listed in the run log).
+- Incremental mode caveats: re-running the workflow on the same commit is a no-op (set `review_mode: full` to force a re-review); files omitted over the token budget are not revisited until they change again; duplicate detection keys on the finding text, so a reworded repeat can be posted twice.
 
 ## Configuration reference
 
@@ -85,6 +86,7 @@ No checkout step is needed — the diff comes from the GitHub API, not the local
 | `llm.model` | yes | — | Model name passed to the endpoint |
 | `llm.temperature` | no | omitted | Sampling temperature; when unset the parameter is not sent (needed for models that reject it, e.g. OpenAI o-series) |
 | `mode` | no | `comment_only` | Only `comment_only` in v1 |
+| `review_mode` | no | `incremental` | What a re-run reviews: `incremental` = only files changed since the last reviewed commit, keeping earlier comments; `full` = the whole diff on every push, superseding previous comments |
 | `ignore` | no | `[]` | Glob patterns (doublestar `**` supported) added to built-in defaults |
 | `suppress` | no | `[]` | Rules that hide findings after review (false-positive lever): each entry has `path` (glob) and/or `text` (case-insensitive substring of the finding comment); when both are set, both must match |
 | `custom_rules` | no | `[]` | Repo-specific rules appended to the generic rules |
