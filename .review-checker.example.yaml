@@ -25,6 +25,16 @@ custom_rules:
   - "Flag any raw SQL string formatting (SQL injection risk)."
   - "Require select_related/prefetch_related on FK/M2M access in list views."
 
+# Hide recurring false positives. Unlike ignore (file never reviewed),
+# suppressed findings are reviewed but not posted. path is a glob (** ok),
+# text a case-insensitive substring of the finding comment; a rule with
+# both requires both to match.
+# suppress:
+#   - path: "tests/**"
+#   - text: "select_related"
+#   - path: "app/legacy/**"
+#     text: "SQL"
+
 # Approximate per-file token budget before a file's diff is truncated
 # in the prompt. Default: 8000.
 # max_file_tokens: 8000

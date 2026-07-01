@@ -4,8 +4,36 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/akhileshthykkat/review-checker/internal/config"
 	"github.com/akhileshthykkat/review-checker/internal/llm"
 )
+
+func TestFilterSuppressed(t *testing.T) {
+	findings := []llm.Finding{
+		{File: "app/views.py", Line: 1, Severity: llm.SeverityWarn, Comment: "Use select_related here."},
+		{File: "tests/test_x.py", Line: 2, Severity: llm.SeverityNit, Comment: "Magic number."},
+		{File: "app/models.py", Line: 3, Severity: llm.SeverityBlock, Comment: "FloatField for money."},
+	}
+	rules := []config.SuppressRule{
+		{Text: "select_related"},
+		{Path: "tests/**"},
+	}
+
+	got := filterSuppressed(findings, rules)
+	if len(got) != 1 || got[0].File != "app/models.py" {
+		t.Errorf("filterSuppressed = %+v, want only app/models.py finding", got)
+	}
+}
+
+func TestFilterSuppressedBothMustMatch(t *testing.T) {
+	findings := []llm.Finding{
+		{File: "app/views.py", Line: 1, Severity: llm.SeverityWarn, Comment: "raw SQL"},
+	}
+	rules := []config.SuppressRule{{Path: "tests/**", Text: "raw sql"}}
+	if got := filterSuppressed(findings, rules); len(got) != 1 {
+		t.Errorf("rule with path+text should require both to match, got %+v", got)
+	}
+}
 
 func TestBuildSummary(t *testing.T) {
 	counts := map[string]int{

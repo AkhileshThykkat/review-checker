@@ -63,6 +63,38 @@ func TestParseRejectsUnsupportedMode(t *testing.T) {
 	}
 }
 
+func TestParseSuppress(t *testing.T) {
+	yaml := validYAML + `
+suppress:
+  - path: "tests/**"
+  - text: "select_related"
+  - path: "app/legacy/**"
+    text: "SQL"
+`
+	cfg, err := Parse([]byte(yaml), "test.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Suppress) != 3 {
+		t.Fatalf("suppress: got %d rules, want 3", len(cfg.Suppress))
+	}
+	if cfg.Suppress[2].Path != "app/legacy/**" || cfg.Suppress[2].Text != "SQL" {
+		t.Errorf("suppress[2] = %+v", cfg.Suppress[2])
+	}
+}
+
+func TestParseSuppressRejectsEmptyRule(t *testing.T) {
+	if _, err := Parse([]byte(validYAML+"suppress:\n  - {}\n"), "test.yaml"); err == nil {
+		t.Error("want error for suppress rule without path or text")
+	}
+}
+
+func TestParseSuppressRejectsBadGlob(t *testing.T) {
+	if _, err := Parse([]byte(validYAML+"suppress:\n  - path: \"[\"\n"), "test.yaml"); err == nil {
+		t.Error("want error for invalid suppress glob")
+	}
+}
+
 func TestIgnoreGlobsExtendsDefaults(t *testing.T) {
 	cfg, err := Parse([]byte(validYAML+"ignore:\n  - \"docs/**\"\n"), "test.yaml")
 	if err != nil {

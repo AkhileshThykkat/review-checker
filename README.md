@@ -86,6 +86,7 @@ No checkout step is needed — the diff comes from the GitHub API, not the local
 | `llm.temperature` | no | omitted | Sampling temperature; when unset the parameter is not sent (needed for models that reject it, e.g. OpenAI o-series) |
 | `mode` | no | `comment_only` | Only `comment_only` in v1 |
 | `ignore` | no | `[]` | Glob patterns (doublestar `**` supported) added to built-in defaults |
+| `suppress` | no | `[]` | Rules that hide findings after review (false-positive lever): each entry has `path` (glob) and/or `text` (case-insensitive substring of the finding comment); when both are set, both must match |
 | `custom_rules` | no | `[]` | Repo-specific rules appended to the generic rules |
 | `max_file_tokens` | no | `8000` | Approximate per-file token budget before a file's diff is truncated |
 | `max_total_tokens` | no | `60000` | Approximate budget for the whole diff section; files past it are omitted from the review (listed as omitted in the prompt and logs) |
@@ -135,6 +136,20 @@ custom_rules:
 - If a rule is universal (applies to every backend repo), it belongs in the generic baseline — open a PR against `default_rules.md` here instead.
 - Rules don't disable the baseline; per-rule opt-out of generic rules isn't supported in v1.
 - After editing rules, open a test PR with a known violation to confirm the model catches it.
+
+## Suppressing false positives
+
+The model will sometimes flag fine code. `suppress` hides such findings *after* the review — unlike `ignore`, the file is still reviewed; matching findings are just not posted:
+
+```yaml
+suppress:
+  - path: "tests/**"            # hide all findings in matching files
+  - text: "select_related"     # hide findings whose comment contains this (case-insensitive)
+  - path: "app/legacy/**"      # both set: both must match
+    text: "SQL"
+```
+
+Suppressed findings are listed in the run log, so you can audit what was hidden.
 
 ## Provider examples
 

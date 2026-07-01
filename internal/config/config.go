@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/bmatcuk/doublestar/v4"
 	"gopkg.in/yaml.v3"
 )
 
@@ -22,6 +23,15 @@ type LLM struct {
 	Temperature *float32 `yaml:"temperature"`
 }
 
+// SuppressRule hides findings after the review runs — unlike ignore, the
+// file is still reviewed; matching findings are just not posted. Path is a
+// doublestar glob against the file path, Text a case-insensitive substring
+// of the finding comment. When both are set, both must match.
+type SuppressRule struct {
+	Path string `yaml:"path"`
+	Text string `yaml:"text"`
+}
+
 // Config is the parsed .review-checker.yaml.
 type Config struct {
 	LLM  LLM    `yaml:"llm"`
@@ -29,6 +39,9 @@ type Config struct {
 
 	// Ignore extends the built-in default ignore globs.
 	Ignore []string `yaml:"ignore"`
+
+	// Suppress drops findings matching any rule before posting.
+	Suppress []SuppressRule `yaml:"suppress"`
 
 	// CustomRules are repo-specific review rules appended to the generic
 	// rules baked into the binary.
@@ -108,6 +121,14 @@ func Parse(raw []byte, path string) (*Config, error) {
 	}
 	if cfg.Mode != ModeCommentOnly {
 		return nil, fmt.Errorf("%s: mode %q not supported in v1 (only %q)", path, cfg.Mode, ModeCommentOnly)
+	}
+	for i, r := range cfg.Suppress {
+		if r.Path == "" && r.Text == "" {
+			return nil, fmt.Errorf("%s: suppress[%d] needs path and/or text", path, i)
+		}
+		if r.Path != "" && !doublestar.ValidatePattern(r.Path) {
+			return nil, fmt.Errorf("%s: suppress[%d] path %q is not a valid glob", path, i, r.Path)
+		}
 	}
 	if cfg.MaxFileTokens <= 0 {
 		cfg.MaxFileTokens = defaultMaxFileTokens

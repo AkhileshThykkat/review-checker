@@ -114,6 +114,7 @@ func run(ctx context.Context, configPath string) error {
 		return err
 	}
 	log.Printf("model reported %d finding(s)", len(findings))
+	findings = filterSuppressed(findings, cfg.Suppress)
 
 	comments, counts := resolveComments(findings, positions)
 	if dropped := len(findings) - len(comments); dropped > 0 {
@@ -198,6 +199,39 @@ func loadConfig(ctx context.Context, client *gh.Client, path, ref string) (*conf
 		return nil, fmt.Errorf("config %s not found locally and not fetchable from repo: %w", path, err)
 	}
 	return config.Parse(raw, path)
+}
+
+// filterSuppressed drops findings matching a suppress rule. Unlike ignore
+// globs (file never sent for review), suppression hides a finding after
+// the review — the lever for recurring false positives.
+func filterSuppressed(findings []llm.Finding, rules []config.SuppressRule) []llm.Finding {
+	if len(rules) == 0 {
+		return findings
+	}
+	kept := findings[:0]
+	for _, f := range findings {
+		if suppressed(f, rules) {
+			log.Printf("suppressed finding at %s:%d", f.File, f.Line)
+			continue
+		}
+		kept = append(kept, f)
+	}
+	return kept
+}
+
+func suppressed(f llm.Finding, rules []config.SuppressRule) bool {
+	for _, r := range rules {
+		if r.Path != "" {
+			if ok, err := doublestar.Match(r.Path, f.File); err != nil || !ok {
+				continue
+			}
+		}
+		if r.Text != "" && !strings.Contains(strings.ToLower(f.Comment), strings.ToLower(r.Text)) {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 func filterIgnored(files []gh.PRFile, globs []string) []gh.PRFile {
